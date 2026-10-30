@@ -827,10 +827,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 'Moss-Image SFT-Kaggle distributed training requires train_unet=true '
                 'and train_text_encoder=false.'
             )
-        if self.train_config.train_refiner or self.train_config.do_paramiter_swapping:
+        if self.train_config.do_paramiter_swapping:
             raise ValueError(
-                'Moss-Image SFT-Kaggle distributed training does not support refiner training '
-                'or parameter swapping.'
+                'Moss-Image SFT-Kaggle distributed training does not support parameter swapping.'
             )
         if self.model_config.layer_offloading:
             raise ValueError(
