@@ -2381,6 +2381,8 @@ class SDTrainer(BaseSDTrainProcess):
             # grads of memory-managed (offloaded) params are async D2H copies into
             # pinned tensors; join them before anything on the CPU reads .grad
             sync_grad_transfers()
+            if getattr(self, 'is_moss_kaggle_distributed', False):
+                self._sync_moss_kaggle_gradients()
             # fix this for multi params
             if self.train_config.optimizer != 'adafactor':
                 if isinstance(self.params[0], dict):

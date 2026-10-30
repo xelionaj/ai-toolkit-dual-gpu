@@ -716,3 +716,9 @@ class MossImageModel(BaseModel):
 
     def get_quantization_exclude_modules(self):
         return MossImageTransformer.get_quantization_exclude_modules()
+
+
+class MossImageKaggleModel(MossImageModel):
+    """Separate UI/config identity for Kaggle experiments using MOSS-Image-SFT."""
+
+    arch = "moss_image_kaggle"

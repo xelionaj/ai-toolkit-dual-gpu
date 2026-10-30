@@ -20,6 +20,7 @@ from safetensors.torch import save_file, load_file
 # from lycoris.config import PRESET
 from torch.utils.data import DataLoader
 import torch
+import torch.distributed as dist
 import torch.backends.cuda
 from huggingface_hub import HfApi, interpreter_login
 from toolkit.memory_management import MemoryManager
@@ -116,6 +117,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # update modelconfig dtype to match train
         model_config['dtype'] = self.train_config.dtype
         self.model_config = ModelConfig(**model_config)
+        self.is_moss_kaggle_distributed = (
+            self.model_config.arch == 'moss_image_kaggle'
+            and self.accelerator.num_processes > 1
+        )
+        if self.is_moss_kaggle_distributed:
+            self._validate_moss_kaggle_distributed_config()
 
         self.save_config = SaveConfig(**self.get_conf('save', {}))
         self.sample_config = SampleConfig(**self.get_conf('sample', {}))
@@ -744,7 +751,25 @@ class BaseSDTrainProcess(BaseTrainProcess):
     
     def prepare_accelerator(self):
         # set some config
-        self.accelerator.even_batches=False
+        self.accelerator.even_batches = self.is_moss_kaggle_distributed
+
+        if self.is_moss_kaggle_distributed:
+            # MOSS LoRA weights are injected into the frozen transformer, so
+            # DDP cannot reliably see their forward graph. Keep each complete
+            # model local to its GPU and synchronize only trainable LoRA grads.
+            self._broadcast_moss_kaggle_parameters()
+            if self.data_loader is not None:
+                self.data_loader = self.accelerator.prepare_data_loader(
+                    self.data_loader, device_placement=False
+                )
+            if self.data_loader_reg is not None:
+                self.data_loader_reg = self.accelerator.prepare_data_loader(
+                    self.data_loader_reg, device_placement=False
+                )
+            self.optimizer = self.accelerator.prepare(self.optimizer)
+            if self.lr_scheduler is not None:
+                self.lr_scheduler = self.accelerator.prepare(self.lr_scheduler)
+            return
         
         # # prepare all the models stuff for accelerator (hopefully we dont miss any)
         if self.sd.vae is not None:
@@ -779,6 +804,92 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # self.data_loader = self.accelerator.prepare(self.data_loader)
         # if self.data_loader_reg is not None:
         #     self.data_loader_reg = self.accelerator.prepare(self.data_loader_reg)
+
+    def _validate_moss_kaggle_distributed_config(self):
+        """Limit the first distributed implementation to the tested design."""
+        if not torch.cuda.is_available() or self.device_torch.type != 'cuda':
+            raise ValueError('Moss-Image SFT-Kaggle distributed training requires CUDA.')
+        if self.accelerator.num_processes != 2:
+            raise ValueError(
+                'Moss-Image SFT-Kaggle currently supports exactly two distributed processes.'
+            )
+        if not dist.is_available() or not dist.is_initialized():
+            raise ValueError(
+                'Launch Moss-Image SFT-Kaggle with a distributed launcher, '
+                'for example: accelerate launch --multi_gpu --num_processes 2 run.py <config.yaml>'
+            )
+        if dist.get_backend() != 'nccl':
+            raise ValueError('Moss-Image SFT-Kaggle distributed training requires the NCCL backend.')
+        if self.network_config is None or self.network_config.type.lower() != 'lora':
+            raise ValueError('Moss-Image SFT-Kaggle distributed training currently supports LoRA only.')
+        if not self.train_config.train_unet or self.train_config.train_text_encoder:
+            raise ValueError(
+                'Moss-Image SFT-Kaggle distributed training requires train_unet=true '
+                'and train_text_encoder=false.'
+            )
+        if self.train_config.train_refiner or self.train_config.do_paramiter_swapping:
+            raise ValueError(
+                'Moss-Image SFT-Kaggle distributed training does not support refiner training '
+                'or parameter swapping.'
+            )
+        if self.model_config.layer_offloading:
+            raise ValueError(
+                'Disable model.layer_offloading for Moss-Image SFT-Kaggle data-parallel training.'
+            )
+
+    def _moss_kaggle_optimizer_parameters(self):
+        seen = set()
+        for group in self.optimizer.param_groups:
+            for param in group['params']:
+                if id(param) not in seen:
+                    seen.add(id(param))
+                    yield param
+
+    def _broadcast_moss_kaggle_parameters(self):
+        """Make initial LoRA weights identical even when no seed was supplied."""
+        parameters = list(self._moss_kaggle_optimizer_parameters())
+        if not parameters:
+            raise ValueError('No trainable parameters found for distributed MOSS LoRA.')
+        for param in parameters:
+            dist.broadcast(param.data, src=0)
+
+    def _sync_moss_kaggle_gradients(self):
+        """Average LoRA gradients across ranks using bounded flat buffers."""
+        parameters = list(self._moss_kaggle_optimizer_parameters())
+        buckets = {}
+        max_bucket_elements = 8 * 1024 * 1024  # at most 32 MiB for float32
+        for param in parameters:
+            if not param.requires_grad:
+                continue
+            key = (param.device, param.dtype)
+            bucket = buckets.setdefault(key, [])
+            bucket_elements = bucket[-1][1] if bucket else 0
+            if bucket and bucket_elements + param.numel() > max_bucket_elements:
+                self._all_reduce_moss_kaggle_bucket([p for p, _ in bucket])
+                bucket.clear()
+                bucket_elements = 0
+            bucket.append((param, bucket_elements + param.numel()))
+        for bucket in buckets.values():
+            if bucket:
+                self._all_reduce_moss_kaggle_bucket([p for p, _ in bucket])
+
+    def _all_reduce_moss_kaggle_bucket(self, parameters):
+        pieces = [
+            p.grad.detach().reshape(-1) if p.grad is not None
+            else torch.zeros(p.numel(), dtype=p.dtype, device=p.device)
+            for p in parameters
+        ]
+        flat = torch.cat(pieces)
+        dist.all_reduce(flat, op=dist.ReduceOp.SUM)
+        flat.div_(self.accelerator.num_processes)
+        offset = 0
+        for param in parameters:
+            count = param.numel()
+            averaged = flat[offset:offset + count].view_as(param)
+            if param.grad is None:
+                param.grad = torch.empty_like(param)
+            param.grad.copy_(averaged)
+            offset += count
             
 
     def ensure_params_requires_grad(self, force=False):

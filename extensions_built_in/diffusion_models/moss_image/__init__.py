@@ -1,3 +1,3 @@
-from .moss_image import MossImageModel
+from .moss_image import MossImageKaggleModel, MossImageModel
 
-__all__ = ["MossImageModel"]
+__all__ = ["MossImageModel", "MossImageKaggleModel"]

@@ -37,7 +37,8 @@ class DiffusionTrainer(SDTrainer):
             # Track all async tasks
             self._async_tasks = []
             # Initialize the status
-            self._run_async_operation(self._update_status("running", "Starting"))
+            if self.accelerator.is_main_process:
+                self._run_async_operation(self._update_status("running", "Starting"))
             self._stop_watcher_started = False
             if os.name == "nt":
                 # On Windows the stop route cannot send us SIGINT from outside
@@ -372,9 +373,13 @@ class DiffusionTrainer(SDTrainer):
         super(DiffusionTrainer, self).end_step_hook()
         if self.is_ui_trainer:
             self.update_step()
+            # Every rank checks stop requests so they exit together. Saving and
+            # sampling are rank-zero operations; other ranks wait at the next
+            # gradient collective while rank zero performs them.
             self.maybe_stop()
-            self.maybe_save()
-            self.maybe_sample()
+            if self.accelerator.is_main_process:
+                self.maybe_save()
+                self.maybe_sample()
 
     def hook_before_model_load(self):
         super().hook_before_model_load()
