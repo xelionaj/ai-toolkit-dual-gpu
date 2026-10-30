@@ -19,6 +19,7 @@ from diffusers.training_utils import compute_density_for_timestep_sampling
 from safetensors.torch import save_file, load_file
 # from lycoris.config import PRESET
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 import torch
 import torch.distributed as dist
 import torch.backends.cuda
@@ -759,12 +760,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
             # model local to its GPU and synchronize only trainable LoRA grads.
             self._broadcast_moss_kaggle_parameters()
             if self.data_loader is not None:
-                self.data_loader = self.accelerator.prepare_data_loader(
-                    self.data_loader, device_placement=False
+                self.data_loader = self._prepare_moss_kaggle_data_loader(
+                    self.data_loader
                 )
             if self.data_loader_reg is not None:
-                self.data_loader_reg = self.accelerator.prepare_data_loader(
-                    self.data_loader_reg, device_placement=False
+                self.data_loader_reg = self._prepare_moss_kaggle_data_loader(
+                    self.data_loader_reg
                 )
             self.optimizer = self.accelerator.prepare(self.optimizer)
             if self.lr_scheduler is not None:
@@ -804,6 +805,28 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # self.data_loader = self.accelerator.prepare(self.data_loader)
         # if self.data_loader_reg is not None:
         #     self.data_loader_reg = self.accelerator.prepare(self.data_loader_reg)
+
+    def _prepare_moss_kaggle_data_loader(self, data_loader):
+        # Bucketed toolkit datasets yield an already-collated batch per item
+        # (DataLoader(batch_size=None)), so Accelerate cannot shard them through
+        # its BatchSamplerShard. Replace only their sampler with a distributed
+        # sampler; regular DataLoaders continue through Accelerate's wrapper.
+        if data_loader.batch_size is None:
+            sampler = DistributedSampler(
+                data_loader.dataset,
+                num_replicas=self.accelerator.num_processes,
+                rank=self.accelerator.process_index,
+                shuffle=True,
+                drop_last=False,
+            )
+            data_loader.sampler = sampler
+            data_loader._aitk_distributed_sampler = sampler
+            data_loader._aitk_distributed_epoch = 0
+            sampler.set_epoch(0)
+            return data_loader
+        return self.accelerator.prepare_data_loader(
+            data_loader, device_placement=False
+        )
 
     def _validate_moss_kaggle_distributed_config(self):
         """Limit the first distributed implementation to the tested design."""

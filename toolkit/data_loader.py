@@ -834,6 +834,13 @@ def get_dataloader_from_datasets(
 
 def trigger_dataloader_setup_epoch(dataloader: DataLoader):
     # hacky but needed because of different types of datasets and dataloaders
+    # MOSS Kaggle's pre-batched loader uses a direct DistributedSampler rather
+    # than Accelerate's wrapper; advance its shuffle seed when restarting it.
+    distributed_sampler = getattr(dataloader, '_aitk_distributed_sampler', None)
+    if distributed_sampler is not None:
+        epoch = getattr(dataloader, '_aitk_distributed_epoch', 0) + 1
+        distributed_sampler.set_epoch(epoch)
+        dataloader._aitk_distributed_epoch = epoch
     dataloader.len = None
     if isinstance(dataloader.dataset, list):
         for dataset in dataloader.dataset:
