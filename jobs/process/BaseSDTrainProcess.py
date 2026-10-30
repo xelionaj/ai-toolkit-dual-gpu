@@ -1890,7 +1890,15 @@ class BaseSDTrainProcess(BaseTrainProcess):
         
         self.hook_after_sd_init_before_load()
         # run base sd process run
-        self.sd.load_model()
+        if self.is_moss_kaggle_distributed:
+            # MOSS repacks multi-shard Hub checkpoints into shared files under
+            # MODELS_PATH. Concurrent ranks race while downloading/merging
+            # those same files, so serialize model initialization; each rank
+            # still loads its own full copy on its assigned GPU.
+            with self.accelerator.main_process_first():
+                self.sd.load_model()
+        else:
+            self.sd.load_model()
         
         self.sd.add_after_sample_image_hook(self.sample_step_hook)
 
