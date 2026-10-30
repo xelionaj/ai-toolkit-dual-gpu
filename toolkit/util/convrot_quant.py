@@ -1482,7 +1482,12 @@ class ConvRotInt8Quantizer(OstrisQuantizer):
             out = F.linear(x_ste, w, module.bias)
             return out.reshape(*x.shape[:-1], out_f)
 
-        if m <= FUSED_GEMV_MAX_M and x.is_cuda and _triton_available():
+        if (
+            m <= FUSED_GEMV_MAX_M
+            and x.is_cuda
+            and _triton_available()
+            and _fused_gemv_triton_ok(x.device)
+        ):
             # decode-size batches: one fused launch instead of the 4-kernel
             # eager chain (bit-identical output, no unpacked weight transient)
             args = self._gemv_args(module)
@@ -1909,6 +1914,24 @@ def _intn_unpack_grouped_fake(packed, gratio, bits, rows, cols):
 # accumulation like torch._int_mm, same fp32 epilogue order.
 
 FUSED_GEMV_MAX_M = 16
+_fused_gemv_triton_ok_cache = {}
+
+
+def _fused_gemv_triton_ok(device) -> bool:
+    """The fused int8-dot kernel requires Ampere or newer.
+
+    Triton's Turing (sm_75) lowering fails in TritonGPUAccelerateMatmul for
+    int8 dot operands; those GPUs use the existing torch._int_mm path instead.
+    """
+    key = str(device)
+    if key not in _fused_gemv_triton_ok_cache:
+        try:
+            _fused_gemv_triton_ok_cache[key] = (
+                torch.cuda.get_device_capability(device) >= (8, 0)
+            )
+        except Exception:
+            _fused_gemv_triton_ok_cache[key] = False
+    return _fused_gemv_triton_ok_cache[key]
 
 _int_gemv_kernel = None
 
