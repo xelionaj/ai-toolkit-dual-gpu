@@ -7,7 +7,7 @@ The repository includes [`notebooks/Moss-Image-SFT-Kaggle-Dual-GPU.ipynb`](noteb
 1. Open the notebook in Kaggle and set **Accelerator** to **GPU T4 x2**.
 2. Enable **Internet** so the notebook can clone this repository and download model files.
 3. Add a Kaggle Dataset containing your training images. Matching `.txt` caption files are optional; images and captions should have the same filename stem.
-4. Run the notebook's **Setup** cell. It checks that two GPUs are visible, clones this fork's `main` branch, installs the toolkit requirements while keeping Kaggle's CUDA-enabled PyTorch, and initializes temporary model/cache directories.
+4. Run the notebook's **Setup** cell. It checks that two GPUs are visible, clones this fork's `main` branch, installs the toolkit requirements while keeping Kaggle's CUDA-enabled PyTorch, selects a compatible TorchAO version, and initializes temporary model/cache directories.
 
 ## Configure and train
 
