@@ -14,6 +14,7 @@ from PIL import Image
 from PIL.ImageOps import exif_transpose
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 import albumentations as A
 
@@ -716,6 +717,8 @@ def get_dataloader_from_datasets(
         batch_size=1,
         sd: 'StableDiffusion' = None,
         pool_datasets: bool = False,
+        distributed_num_replicas: int = None,
+        distributed_rank: int = None,
 ) -> DataLoader:
     if dataset_options is None or len(dataset_options) == 0:
         return None
@@ -806,14 +809,30 @@ def get_dataloader_from_datasets(
         for dataset in datasets:
             assert dataset.dataset_config.buckets, f"buckets not found on dataset {dataset.dataset_config.folder_path}, you either need all buckets or none"
 
+        sampler = None
+        if distributed_num_replicas is not None or distributed_rank is not None:
+            if distributed_num_replicas is None or distributed_rank is None:
+                raise ValueError("Both distributed_num_replicas and distributed_rank are required")
+            sampler = DistributedSampler(
+                concatenated_dataset,
+                num_replicas=distributed_num_replicas,
+                rank=distributed_rank,
+                shuffle=True,
+                drop_last=False,
+            )
+
         data_loader = DataLoader(
             concatenated_dataset,
             batch_size=None,  # we batch in the datasets for now
             drop_last=False,
-            shuffle=True,
+            shuffle=sampler is None,
+            sampler=sampler,
             collate_fn=dto_collation,  # Use the custom collate function
             **dataloader_kwargs
         )
+        if sampler is not None:
+            data_loader._aitk_distributed_sampler = sampler
+            data_loader._aitk_distributed_epoch = 0
     else:
         # without buckets the dataloader batches across all datasets at once,
         # so a dataset level batch_size cannot apply

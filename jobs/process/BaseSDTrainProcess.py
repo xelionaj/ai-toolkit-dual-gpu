@@ -19,7 +19,6 @@ from diffusers.training_utils import compute_density_for_timestep_sampling
 from safetensors.torch import save_file, load_file
 # from lycoris.config import PRESET
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 import torch
 import torch.distributed as dist
 import torch.backends.cuda
@@ -809,20 +808,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
     def _prepare_moss_kaggle_data_loader(self, data_loader):
         # Bucketed toolkit datasets yield an already-collated batch per item
         # (DataLoader(batch_size=None)), so Accelerate cannot shard them through
-        # its BatchSamplerShard. Replace only their sampler with a distributed
-        # sampler; regular DataLoaders continue through Accelerate's wrapper.
+        # its BatchSamplerShard. Their DistributedSampler is installed during
+        # construction; regular DataLoaders continue through Accelerate's wrapper.
         if data_loader.batch_size is None:
-            sampler = DistributedSampler(
-                data_loader.dataset,
-                num_replicas=self.accelerator.num_processes,
-                rank=self.accelerator.process_index,
-                shuffle=True,
-                drop_last=False,
-            )
-            data_loader.sampler = sampler
-            data_loader._aitk_distributed_sampler = sampler
-            data_loader._aitk_distributed_epoch = 0
-            sampler.set_epoch(0)
+            if getattr(data_loader, '_aitk_distributed_sampler', None) is None:
+                raise ValueError(
+                    "MOSS Kaggle bucketed data loaders must be created with a distributed sampler."
+                )
             return data_loader
         return self.accelerator.prepare_data_loader(
             data_loader, device_placement=False
@@ -2388,11 +2380,15 @@ class BaseSDTrainProcess(BaseTrainProcess):
             self.data_loader = get_dataloader_from_datasets(
                 self.datasets, self.train_config.batch_size, self.sd,
                 pool_datasets=self.train_config.pool_datasets,
+                distributed_num_replicas=(self.accelerator.num_processes if self.is_moss_kaggle_distributed else None),
+                distributed_rank=(self.accelerator.process_index if self.is_moss_kaggle_distributed else None),
             )
         if self.datasets_reg is not None:
             self.data_loader_reg = get_dataloader_from_datasets(
                 self.datasets_reg, self.train_config.batch_size, self.sd,
                 pool_datasets=self.train_config.pool_datasets,
+                distributed_num_replicas=(self.accelerator.num_processes if self.is_moss_kaggle_distributed else None),
+                distributed_rank=(self.accelerator.process_index if self.is_moss_kaggle_distributed else None),
             )
 
         # a fresh text-embedding cache leaves the text encoder on the gpu (the
